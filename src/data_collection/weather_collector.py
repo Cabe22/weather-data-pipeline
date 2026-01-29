@@ -33,7 +33,7 @@ class WeatherConfig:
 class WeatherCollector:
     """Collects weather data from OpenWeatherMap API"""
     
-    BASE_URL = "http://api.openweathermap.org/data/2.5/weather"
+    BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
     
     def __init__(self, config: WeatherConfig):
         self.config = config
