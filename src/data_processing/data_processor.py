@@ -178,7 +178,7 @@ class WeatherDataProcessor:
         
         # Forward fill for time series continuity (within each city)
         time_cols = ['temperature', 'humidity', 'pressure', 'wind_speed']
-        df[time_cols] = df.groupby('city')[time_cols].fillna(method='ffill', limit=3)
+        df[time_cols] = df.groupby('city')[time_cols].ffill(limit=3)
         
         # Fill remaining with interpolation
         df[time_cols] = df.groupby('city')[time_cols].apply(
