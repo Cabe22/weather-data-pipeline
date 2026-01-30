@@ -11,9 +11,12 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sqlite3
 from datetime import datetime, timedelta
-import joblib
 from typing import Dict, List
 import os
+from src.data_processing.data_processor import WeatherDataProcessor
+from src.ml_models.weather_predictor import WeatherPredictor
+import logging
+logger = logging.getLogger(__name__)
 
 # Page configuration
 st.set_page_config(
@@ -67,21 +70,36 @@ def load_data(db_path: str = "data/weather.db", hours: int = 168) -> pd.DataFram
     return df
 
 @st.cache_resource
-def load_models(model_dir: str = "models/") -> Dict:
-    """Load trained ML models"""
-    models = {}
-    
+def load_predictor(model_dir: str = "models/") -> WeatherPredictor:
+    """Load trained ML models via WeatherPredictor"""
+    predictor = WeatherPredictor(model_dir=model_dir)
     if os.path.exists(model_dir):
-        for filename in os.listdir(model_dir):
-            if filename.endswith('_model.pkl'):
-                name = filename.replace('_model.pkl', '')
-                filepath = os.path.join(model_dir, filename)
-                try:
-                    models[name] = joblib.load(filepath)
-                except:
-                    st.warning(f"Could not load model: {name}")
-    
-    return models
+        try:
+            predictor.load_models()
+        except Exception as e:
+            logger.warning(f"Could not load models: {e}")
+            st.warning(f"Could not load models from {model_dir}: {e}")
+    return predictor
+
+@st.cache_data(ttl=300)
+def engineer_features_for_prediction(db_path: str = "data/weather.db") -> pd.DataFrame:
+    """Run full feature engineering pipeline for prediction"""
+    processor = WeatherDataProcessor(db_path=db_path)
+    try:
+        df = processor.load_data()
+        if df.empty:
+            return df
+        df = processor.create_time_features(df)
+        df = processor.create_lag_features(df)
+        df = processor.create_weather_indices(df)
+        df = processor.create_interaction_features(df)
+        df = processor.handle_missing_values(df)
+        df = processor.encode_categorical_features(df)
+        df = processor.create_target_variable(df)
+        return df  # DO NOT drop NaN target rows
+    except Exception as e:
+        logger.error(f"Feature engineering failed: {e}")
+        return pd.DataFrame()
 
 def create_temperature_chart(df: pd.DataFrame, city: str = None) -> go.Figure:
     """Create temperature time series chart"""
@@ -237,28 +255,35 @@ def create_city_comparison(df: pd.DataFrame) -> go.Figure:
     
     return fig
 
-def predict_temperature(models: Dict, df: pd.DataFrame, city: str) -> Dict:
-    """Make temperature predictions"""
-    
-    if 'temperature' not in models or df.empty:
-        return None
-    
-    # Get latest data for city
-    city_data = df[df['city'] == city].iloc[0:1]
-    
-    # Simple feature preparation (you'd use the full processing pipeline in production)
-    features = ['temperature', 'humidity', 'pressure', 'wind_speed', 'cloudiness']
-    X = city_data[features].fillna(0)
-    
+def predict_temperature(predictor: WeatherPredictor,
+                        engineered_df: pd.DataFrame, city: str) -> Dict:
+    """Make temperature predictions using full feature pipeline"""
+    if 'temperature' not in predictor.best_models:
+        return {'error': 'No temperature model available. Train a model first.'}
+    if engineered_df.empty:
+        return {'error': 'No engineered feature data available.'}
+    city_data = engineered_df[engineered_df['city'] == city]
+    if city_data.empty:
+        return {'error': f'No data available for city: {city}'}
+    latest_row = city_data.sort_values('timestamp', ascending=False).iloc[0:1]
+    if predictor.feature_columns is None:
+        return {'error': 'Model metadata missing. Please retrain with updated pipeline.'}
+    missing = [c for c in predictor.feature_columns if c not in latest_row.columns]
+    if missing:
+        return {'error': f'Feature mismatch: {len(missing)} expected features missing.'}
     try:
-        prediction = models['temperature'].predict(X)[0]
+        prediction = predictor.predict(latest_row, model_type='temperature')[0]
+        current_temp = latest_row['temperature'].values[0]
         return {
-            'current_temp': city_data['temperature'].values[0],
+            'current_temp': current_temp,
             'predicted_temp': prediction,
-            'change': prediction - city_data['temperature'].values[0]
+            'change': prediction - current_temp,
+            'features_used': len(predictor.feature_columns),
+            'has_scaler': predictor.scaler is not None
         }
-    except:
-        return None
+    except Exception as e:
+        logger.error(f"Prediction failed for {city}: {e}")
+        return {'error': f'Prediction failed: {str(e)}'}
 
 # Main Dashboard
 def main():
@@ -284,7 +309,7 @@ def main():
         st.stop()
     
     # Load models
-    models = load_models()
+    predictor = load_predictor()
     
     # City selector
     cities = df['city'].unique()
@@ -356,29 +381,37 @@ def main():
     st.plotly_chart(city_comp_fig, use_container_width=True)
     
     # ML Predictions Section
-    if models:
+    if predictor.best_models:
         st.header("🤖 Machine Learning Predictions")
-        
+
         col1, col2 = st.columns(2)
-        
+
         with col1:
             pred_city = st.selectbox("Select city for prediction", cities)
-        
+
         with col2:
             if st.button("Generate Prediction"):
-                prediction = predict_temperature(models, df, pred_city)
-                
-                if prediction:
+                with st.spinner("Engineering features..."):
+                    engineered_df = engineer_features_for_prediction()
+                prediction = predict_temperature(predictor, engineered_df, pred_city)
+
+                if 'error' in prediction:
+                    st.error(prediction['error'])
+                else:
                     st.success(f"**Prediction for {pred_city}:**")
                     st.write(f"Current Temperature: {prediction['current_temp']:.1f}°C")
                     st.write(f"Predicted Temperature (24h): {prediction['predicted_temp']:.1f}°C")
-                    
+
                     if prediction['change'] > 0:
                         st.write(f"Expected Change: 🔴 +{prediction['change']:.1f}°C")
                     else:
                         st.write(f"Expected Change: 🔵 {prediction['change']:.1f}°C")
-                else:
-                    st.error("Could not generate prediction. Check if models are trained.")
+                    st.caption(
+                        f"Features used: {prediction['features_used']} | "
+                        f"Scaler: {'active' if prediction['has_scaler'] else 'none'}"
+                    )
+    else:
+        st.info("No trained models found. Train models to enable predictions.")
     
     # Data Table
     with st.expander("📋 View Raw Data"):
