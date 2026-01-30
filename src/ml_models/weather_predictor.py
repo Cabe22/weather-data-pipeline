@@ -10,6 +10,7 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, R
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, classification_report, roc_auc_score
 from sklearn.neural_network import MLPRegressor
+from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 import joblib
 import matplotlib.pyplot as plt
@@ -27,6 +28,8 @@ class WeatherPredictor:
         self.models = {}
         self.best_models = {}
         self.feature_importance = {}
+        self.scaler = None
+        self.feature_columns = None
         
     def prepare_features(self, df: pd.DataFrame, 
                         target_col: str = 'temperature_future') -> Tuple[pd.DataFrame, pd.Series]:
@@ -51,7 +54,11 @@ class WeatherPredictor:
         
         X = df[feature_cols].fillna(0)
         y = df[target_col]
-        
+
+        self.feature_columns = list(X.columns)
+        self.scaler = StandardScaler()
+        X = pd.DataFrame(self.scaler.fit_transform(X), columns=self.feature_columns, index=X.index)
+
         logger.info(f"Prepared {X.shape[1]} features for training")
         return X, y
         
@@ -308,6 +315,20 @@ class WeatherPredictor:
         
         return results
     
+    def predict(self, X: pd.DataFrame, model_type: str = 'temperature') -> np.ndarray:
+        """Apply saved scaler and predict using a trained model"""
+        if model_type not in self.best_models:
+            raise ValueError(f"No trained model found for '{model_type}'")
+        if self.scaler is None:
+            raise ValueError("No scaler fitted. Train a model first or load one.")
+
+        X_prepared = X[self.feature_columns].fillna(0)
+        X_scaled = pd.DataFrame(
+            self.scaler.transform(X_prepared),
+            columns=self.feature_columns, index=X_prepared.index
+        )
+        return self.best_models[model_type].predict(X_scaled)
+
     def save_models(self):
         """Save trained models to disk"""
         import os
@@ -315,7 +336,12 @@ class WeatherPredictor:
         
         for name, model in self.best_models.items():
             filepath = f"{self.model_dir}{name}_model.pkl"
-            joblib.dump(model, filepath)
+            artifact = {
+                'model': model,
+                'scaler': self.scaler,
+                'feature_columns': self.feature_columns
+            }
+            joblib.dump(artifact, filepath)
             logger.info(f"Saved {name} model to {filepath}")
     
     def load_models(self):
@@ -326,7 +352,14 @@ class WeatherPredictor:
             if filename.endswith('_model.pkl'):
                 name = filename.replace('_model.pkl', '')
                 filepath = f"{self.model_dir}{filename}"
-                self.best_models[name] = joblib.load(filepath)
+                loaded = joblib.load(filepath)
+                if isinstance(loaded, dict):
+                    self.best_models[name] = loaded['model']
+                    self.scaler = loaded.get('scaler')
+                    self.feature_columns = loaded.get('feature_columns')
+                else:
+                    # Backward compatibility: bare model from old saves
+                    self.best_models[name] = loaded
                 logger.info(f"Loaded {name} model from {filepath}")
     
     def plot_model_comparison(self, results: Dict):
