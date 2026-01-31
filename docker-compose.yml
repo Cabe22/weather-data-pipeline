@@ -1,0 +1,24 @@
+services:
+  dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  collector:
+    build: .
+    entrypoint: ["python", "run_data_collection.py"]
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - dashboard
