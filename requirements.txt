@@ -10,3 +10,7 @@ matplotlib==3.7.2
 seaborn==0.12.2
 schedule==1.2.0
 python-dotenv==1.0.0
+
+# Testing
+pytest==7.4.0
+pytest-cov==4.1.0
