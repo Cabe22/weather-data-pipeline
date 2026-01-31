@@ -23,6 +23,7 @@ class TestAPIUnit:
 
     def test_fetch_weather_data_http_error(self, weather_config):
         mock_response = MagicMock()
+        mock_response.status_code = 404
         mock_response.raise_for_status.side_effect = HTTPError("404 Not Found")
 
         with patch(
