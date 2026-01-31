@@ -16,6 +16,7 @@ import os
 from src.data_processing.data_processor import WeatherDataProcessor
 from src.ml_models.weather_predictor import WeatherPredictor
 from src.ml_models.model_registry import ModelRegistry
+import time
 import logging
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data
+@st.cache_data(ttl=60)
 def load_data(db_path: str = "data/weather.db", hours: int = 168) -> pd.DataFrame:
     """Load weather data from database"""
     conn = sqlite3.connect(db_path)
@@ -77,9 +78,26 @@ def load_predictor(model_dir: str = "models/") -> WeatherPredictor:
     if os.path.exists(model_dir):
         try:
             predictor.load_models()
+        except FileNotFoundError as e:
+            logger.warning(f"Model files not found in {model_dir}: {e}")
+            st.warning(
+                f"**Model files not found in `{model_dir}`.**\n\n"
+                "Train models first by running the ML pipeline:\n"
+                "```python src/ml_models/weather_predictor.py```"
+            )
         except Exception as e:
             logger.warning(f"Could not load models: {e}")
-            st.warning(f"Could not load models from {model_dir}: {e}")
+            st.warning(
+                f"**Failed to load models:** {e}\n\n"
+                "Possible causes:\n"
+                "- Model files may be corrupted — try retraining\n"
+                "- Python/library version mismatch — check `requirements.txt`"
+            )
+    else:
+        st.info(
+            f"**Model directory `{model_dir}` does not exist.**\n\n"
+            "Train models first to enable predictions."
+        )
     return predictor
 
 @st.cache_data(ttl=300)
@@ -100,6 +118,11 @@ def engineer_features_for_prediction(db_path: str = "data/weather.db") -> pd.Dat
         return df  # DO NOT drop NaN target rows
     except Exception as e:
         logger.error(f"Feature engineering failed: {e}")
+        st.error(
+            f"**Feature engineering failed:** {e}\n\n"
+            "This may be caused by insufficient data or database schema changes. "
+            "Ensure data collection has been running and the database is not empty."
+        )
         return pd.DataFrame()
 
 def create_temperature_chart(df: pd.DataFrame, city: str = None) -> go.Figure:
@@ -303,23 +326,45 @@ def main():
     )
     
     # Load data
-    df = load_data(hours=time_range)
+    with st.spinner("Loading weather data..."):
+        df = load_data(hours=time_range)
     
     if df.empty:
-        st.error("No data available. Please run the data collection script first.")
+        st.error(
+            "**No weather data found** for the selected time range.\n\n"
+            "**Troubleshooting:**\n"
+            "1. Verify the database exists at `data/weather.db`\n"
+            "2. Run data collection: `python run_data_collection.py`\n"
+            "3. Try a wider time range from the sidebar\n"
+            "4. Check that your `.env` file has a valid `OPENWEATHER_API_KEY`"
+        )
         st.stop()
     
     # Load models
-    predictor = load_predictor()
+    with st.spinner("Loading ML models..."):
+        predictor = load_predictor()
     
     # City selector
     cities = df['city'].unique()
     selected_city = st.sidebar.selectbox("Select City", options=['All'] + list(cities))
     
     # Auto-refresh
-    auto_refresh = st.sidebar.checkbox("Auto-refresh (every 60 seconds)")
-    
+    auto_refresh = st.sidebar.checkbox("Auto-refresh")
+    refresh_interval = 60
     if auto_refresh:
+        refresh_interval = st.sidebar.select_slider(
+            "Refresh interval",
+            options=[30, 60, 120, 300],
+            value=60,
+            format_func=lambda x: f"{x}s" if x < 120 else f"{x // 60}min"
+        )
+        st.sidebar.caption(
+            f"Dashboard will refresh every {refresh_interval}s. "
+            "Uncheck to stop."
+        )
+
+    if st.sidebar.button("Refresh Now"):
+        st.cache_data.clear()
         st.rerun()
     
     # Metrics
@@ -394,7 +439,8 @@ def main():
             if st.button("Generate Prediction"):
                 with st.spinner("Engineering features..."):
                     engineered_df = engineer_features_for_prediction()
-                prediction = predict_temperature(predictor, engineered_df, pred_city)
+                with st.spinner("Generating prediction..."):
+                    prediction = predict_temperature(predictor, engineered_df, pred_city)
 
                 if 'error' in prediction:
                     st.error(prediction['error'])
@@ -412,7 +458,12 @@ def main():
                         f"Scaler: {'active' if prediction['has_scaler'] else 'none'}"
                     )
     else:
-        st.info("No trained models found. Train models to enable predictions.")
+        st.info(
+            "**No trained models available.**\n\n"
+            "To enable ML predictions, train models by running:\n"
+            "```\npython src/ml_models/weather_predictor.py\n```\n"
+            "Ensure you have collected enough data first (at least 100 records recommended)."
+        )
 
     # Model Information Section
     if predictor.model_metadata:
@@ -435,11 +486,11 @@ def main():
                 sample_cols[0].metric("Training Samples", f"{meta.get('training_samples', 'N/A'):,}" if isinstance(meta.get('training_samples'), int) else 'N/A')
                 sample_cols[1].metric("Test Samples", f"{meta.get('test_samples', 'N/A'):,}" if isinstance(meta.get('test_samples'), int) else 'N/A')
 
-                metrics = meta.get('metrics', {})
-                if metrics:
+                perf_metrics = meta.get('metrics', {})
+                if perf_metrics:
                     st.subheader("Performance Metrics")
-                    metric_cols = st.columns(len(metrics))
-                    for i, (k, v) in enumerate(metrics.items()):
+                    metric_cols = st.columns(len(perf_metrics))
+                    for i, (k, v) in enumerate(perf_metrics.items()):
                         label = k.replace('_', ' ').title()
                         metric_cols[i].metric(label, f"{v:.4f}" if isinstance(v, float) else str(v))
 
@@ -469,8 +520,8 @@ def main():
             version_rows = []
             for v in all_versions:
                 meta = v.get("metadata", {})
-                metrics = meta.get("metrics", {})
-                primary_metric = metrics.get("test_r2", metrics.get("roc_auc", ""))
+                ver_metrics = meta.get("metrics", {})
+                primary_metric = ver_metrics.get("test_r2", ver_metrics.get("roc_auc", ""))
                 version_rows.append({
                     "Version": v["version"],
                     "Type": v["model_type"],
@@ -536,10 +587,31 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.markdown(
-        f"**Last Updated:** {metrics['latest_update'].strftime('%Y-%m-%d %H:%M:%S')}"
-        if pd.notnull(metrics['latest_update']) else "No data"
-    )
+    if pd.notnull(metrics['latest_update']):
+        data_age = datetime.now() - metrics['latest_update']
+        age_minutes = int(data_age.total_seconds() / 60)
+        if age_minutes < 60:
+            freshness = f"{age_minutes} minute{'s' if age_minutes != 1 else ''} ago"
+        elif age_minutes < 1440:
+            freshness = f"{age_minutes // 60} hour{'s' if age_minutes // 60 != 1 else ''} ago"
+        else:
+            freshness = f"{age_minutes // 1440} day{'s' if age_minutes // 1440 != 1 else ''} ago"
+        st.markdown(
+            f"**Last data point:** {metrics['latest_update'].strftime('%Y-%m-%d %H:%M:%S')} "
+            f"({freshness})"
+        )
+        if age_minutes > 60:
+            st.caption(
+                "Data may be stale. Run `python run_data_collection.py` to collect fresh data."
+            )
+    else:
+        st.markdown("**Last data point:** No data available")
+
+    # Auto-refresh: wait for interval then refresh data
+    if auto_refresh:
+        time.sleep(refresh_interval)
+        st.cache_data.clear()
+        st.rerun()
 
 if __name__ == "__main__":
     main()
