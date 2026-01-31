@@ -6,7 +6,7 @@ Processes raw weather data and creates features for ML models
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from typing import Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional
 import sqlite3
 from datetime import datetime, timedelta
 import logging
@@ -276,7 +276,10 @@ class WeatherDataProcessor:
         
         # Load data
         df = self.load_data(start_date, end_date)
-        
+
+        # Run quality checks on raw data
+        self.run_quality_checks(df)
+
         # Create features
         df = self.create_time_features(df)
         df = self.create_lag_features(df)
@@ -298,6 +301,92 @@ class WeatherDataProcessor:
         logger.info(f"Pipeline complete. Final dataset shape: {df.shape}")
         return df
         
+    # Physically plausible ranges for weather measurements
+    VALID_RANGES = {
+        'temperature': (-60.0, 60.0),
+        'feels_like': (-70.0, 70.0),
+        'temp_min': (-60.0, 60.0),
+        'temp_max': (-60.0, 60.0),
+        'humidity': (0, 100),
+        'pressure': (870, 1084),
+        'wind_speed': (0.0, 120.0),
+        'wind_deg': (0, 360),
+        'cloudiness': (0, 100),
+        'visibility': (0, 100000),
+    }
+
+    def run_quality_checks(self, df: pd.DataFrame) -> Dict:
+        """Run data quality checks and return a report.
+
+        Checks performed:
+        - Duplicate (city, timestamp) rows
+        - Missing values per column
+        - Out-of-range values for known weather measurements
+        - Rows with a high proportion of nulls
+
+        Returns a dict summarising the issues found. Warnings are
+        also emitted via the module logger.
+        """
+        report: Dict = {
+            'total_rows': len(df),
+            'duplicates': {},
+            'missing': {},
+            'out_of_range': {},
+            'high_null_rows': 0,
+        }
+
+        # --- Duplicates -------------------------------------------------------
+        if 'city' in df.columns and 'timestamp' in df.columns:
+            dup_mask = df.duplicated(subset=['city', 'timestamp'], keep=False)
+            dup_count = dup_mask.sum()
+            if dup_count > 0:
+                logger.warning(f"Found {dup_count} duplicate (city, timestamp) rows")
+            report['duplicates'] = {'city_timestamp': int(dup_count)}
+
+        # --- Missing values ----------------------------------------------------
+        missing = df.isnull().sum()
+        missing = missing[missing > 0]
+        for col, count in missing.items():
+            pct = count / len(df) * 100
+            logger.warning(f"Column '{col}' has {count} missing values ({pct:.1f}%)")
+            report['missing'][col] = {'count': int(count), 'percent': round(pct, 1)}
+
+        # --- Out-of-range values -----------------------------------------------
+        for col, (lo, hi) in self.VALID_RANGES.items():
+            if col not in df.columns:
+                continue
+            series = pd.to_numeric(df[col], errors='coerce')
+            below = (series < lo).sum()
+            above = (series > hi).sum()
+            if below > 0 or above > 0:
+                total = below + above
+                logger.warning(
+                    f"Column '{col}': {total} values outside [{lo}, {hi}] "
+                    f"({below} below, {above} above)"
+                )
+                report['out_of_range'][col] = {
+                    'below': int(below),
+                    'above': int(above),
+                    'range': [lo, hi],
+                }
+
+        # --- High-null rows ----------------------------------------------------
+        null_threshold = len(df.columns) * 0.3  # >30 % nulls in a row
+        row_nulls = df.isnull().sum(axis=1)
+        high_null = (row_nulls > null_threshold).sum()
+        if high_null > 0:
+            logger.warning(f"{high_null} rows have >30% null values")
+        report['high_null_rows'] = int(high_null)
+
+        if (not report['missing'] and not report['out_of_range']
+                and report['duplicates'].get('city_timestamp', 0) == 0
+                and high_null == 0):
+            logger.info("Data quality checks passed — no issues found")
+        else:
+            logger.info("Data quality checks complete — see warnings above")
+
+        return report
+
     def get_feature_importance_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate basic feature statistics for importance analysis"""
         feature_cols = [col for col in df.columns 

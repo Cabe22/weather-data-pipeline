@@ -6,6 +6,7 @@ Unit tests use mocks and tmp_path; integration tests use the live API.
 import os
 import sqlite3
 import pytest
+from unittest.mock import MagicMock
 
 from src.data_collection.weather_collector import WeatherCollector, WeatherConfig
 
@@ -78,8 +79,21 @@ class TestStoreAndRetrieve:
 
         assert count == 1
 
-    def test_collect_all_cities_stores_one_per_city(self, mock_collector):
-        collector, _ = mock_collector
+    def test_collect_all_cities_stores_one_per_city(
+        self, mock_collector, sample_raw_api_response
+    ):
+        collector, mock_get = mock_collector
+
+        # Return distinct city responses so UPSERT doesn't merge them
+        ny_resp = MagicMock(status_code=200, raise_for_status=MagicMock(return_value=None))
+        ny_resp.json.return_value = sample_raw_api_response
+
+        la_data = {**sample_raw_api_response, "name": "Los Angeles", "dt": 1700003600}
+        la_data["coord"] = {"lon": -118.24, "lat": 34.05}
+        la_resp = MagicMock(status_code=200, raise_for_status=MagicMock(return_value=None))
+        la_resp.json.return_value = la_data
+
+        mock_get.side_effect = [ny_resp, la_resp]
         collector.collect_all_cities()
 
         conn = sqlite3.connect(collector.config.db_path)
