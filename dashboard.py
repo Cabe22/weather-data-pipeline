@@ -15,6 +15,7 @@ from typing import Dict, List
 import os
 from src.data_processing.data_processor import WeatherDataProcessor
 from src.ml_models.weather_predictor import WeatherPredictor
+from src.ml_models.model_registry import ModelRegistry
 import logging
 logger = logging.getLogger(__name__)
 
@@ -412,7 +413,103 @@ def main():
                     )
     else:
         st.info("No trained models found. Train models to enable predictions.")
-    
+
+    # Model Information Section
+    if predictor.model_metadata:
+        st.header("Model Information")
+
+        for model_type, meta in predictor.model_metadata.items():
+            with st.expander(f"{model_type.title()} Model Details", expanded=False):
+                info_cols = st.columns(3)
+                trained_at = meta.get('trained_at', 'Unknown')
+                if trained_at != 'Unknown':
+                    try:
+                        trained_at = datetime.fromisoformat(trained_at).strftime('%Y-%m-%d %H:%M UTC')
+                    except ValueError:
+                        pass
+                info_cols[0].metric("Trained", trained_at)
+                info_cols[1].metric("Algorithm", meta.get('best_algorithm', 'N/A'))
+                info_cols[2].metric("Features", meta.get('num_features', 'N/A'))
+
+                sample_cols = st.columns(2)
+                sample_cols[0].metric("Training Samples", f"{meta.get('training_samples', 'N/A'):,}" if isinstance(meta.get('training_samples'), int) else 'N/A')
+                sample_cols[1].metric("Test Samples", f"{meta.get('test_samples', 'N/A'):,}" if isinstance(meta.get('test_samples'), int) else 'N/A')
+
+                metrics = meta.get('metrics', {})
+                if metrics:
+                    st.subheader("Performance Metrics")
+                    metric_cols = st.columns(len(metrics))
+                    for i, (k, v) in enumerate(metrics.items()):
+                        label = k.replace('_', ' ').title()
+                        metric_cols[i].metric(label, f"{v:.4f}" if isinstance(v, float) else str(v))
+
+                # Per-algorithm breakdown (temperature models)
+                all_models = meta.get('all_models', {})
+                if all_models:
+                    st.subheader("All Algorithms")
+                    rows = []
+                    for algo, m in all_models.items():
+                        rows.append({
+                            "Algorithm": algo,
+                            "Test R2": f"{m['test_r2']:.4f}",
+                            "Test MSE": f"{m['test_mse']:.4f}",
+                            "Test MAE": f"{m['test_mae']:.4f}",
+                        })
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # Model Version History & Comparison
+    registry_path = os.path.join("models", "registry.json")
+    if os.path.exists(registry_path):
+        registry = ModelRegistry(registry_path)
+        all_versions = registry.list_versions()
+
+        if all_versions:
+            st.header("Model Version History")
+
+            version_rows = []
+            for v in all_versions:
+                meta = v.get("metadata", {})
+                metrics = meta.get("metrics", {})
+                primary_metric = metrics.get("test_r2", metrics.get("roc_auc", ""))
+                version_rows.append({
+                    "Version": v["version"],
+                    "Type": v["model_type"],
+                    "Registered": v.get("registered_at", "")[:19].replace("T", " "),
+                    "Algorithm": meta.get("best_algorithm", ""),
+                    "Primary Metric": f"{primary_metric:.4f}" if isinstance(primary_metric, float) else str(primary_metric),
+                })
+            st.dataframe(pd.DataFrame(version_rows), use_container_width=True, hide_index=True)
+
+            # Comparison selector
+            if len(all_versions) >= 2:
+                st.subheader("Compare Versions")
+                version_labels = [f"{v['version']} ({v['model_type']})" for v in all_versions]
+                comp_cols = st.columns(2)
+                sel_a = comp_cols[0].selectbox("Version A", version_labels, index=len(version_labels) - 2)
+                sel_b = comp_cols[1].selectbox("Version B", version_labels, index=len(version_labels) - 1)
+                ver_a = sel_a.split(" ")[0]
+                ver_b = sel_b.split(" ")[0]
+                if ver_a != ver_b:
+                    comparison = registry.compare(ver_a, ver_b)
+                    if comparison and comparison["metrics"]:
+                        rows = []
+                        for metric_name, vals in comparison["metrics"].items():
+                            label = metric_name.replace('_', ' ').title()
+                            va = vals.get(ver_a)
+                            vb = vals.get(ver_b)
+                            delta = vals.get("delta")
+                            rows.append({
+                                "Metric": label,
+                                ver_a: f"{va:.4f}" if isinstance(va, float) else str(va),
+                                ver_b: f"{vb:.4f}" if isinstance(vb, float) else str(vb),
+                                "Delta": f"{delta:+.4f}" if isinstance(delta, float) else "",
+                            })
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No metrics available to compare.")
+                else:
+                    st.info("Select two different versions to compare.")
+
     # Data Table
     with st.expander("📋 View Raw Data"):
         # Filter data if city selected
