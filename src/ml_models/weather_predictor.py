@@ -15,7 +15,8 @@ import xgboost as xgb
 import joblib
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Dict, Tuple, List, Any
+from typing import Dict, Tuple, List, Any, Optional
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ class WeatherPredictor:
         self.feature_importance = {}
         self.scaler = None
         self.feature_columns = None
+        self.model_metadata: Dict[str, Dict] = {}
         
     def prepare_features(self, df: pd.DataFrame, 
                         target_col: str = 'temperature_future') -> Tuple[pd.DataFrame, pd.Series]:
@@ -152,13 +154,36 @@ class WeatherPredictor:
                 }).sort_values('importance', ascending=False)
         
         self.models['temperature'] = results
-        
+
         # Select best model based on test R2 score
         best_model_name = max(results.keys(), key=lambda x: results[x]['test_r2'])
         self.best_models['temperature'] = results[best_model_name]['model']
-        
+
+        best = results[best_model_name]
+        self.model_metadata['temperature'] = {
+            'trained_at': datetime.utcnow().isoformat(),
+            'best_algorithm': best_model_name,
+            'num_features': X.shape[1],
+            'training_samples': len(X_train),
+            'test_samples': len(X_test),
+            'metrics': {
+                'test_r2': float(best['test_r2']),
+                'test_mse': float(best['test_mse']),
+                'test_mae': float(best['test_mae']),
+                'cv_score_mean': float(best['cv_score_mean']),
+            },
+            'all_models': {
+                name: {
+                    'test_r2': float(r['test_r2']),
+                    'test_mse': float(r['test_mse']),
+                    'test_mae': float(r['test_mae']),
+                }
+                for name, r in results.items()
+            },
+        }
+
         logger.info(f"Best temperature model: {best_model_name} with R2: {results[best_model_name]['test_r2']:.4f}")
-        
+
         return results
     
     def train_rain_classifier(self, X: pd.DataFrame, y: pd.Series) -> Dict:
@@ -202,15 +227,29 @@ class WeatherPredictor:
         
         self.models['rain'] = results
         self.best_models['rain'] = clf
-        
+
         # Store feature importance
         self.feature_importance['rain_classifier'] = pd.DataFrame({
             'feature': X.columns,
             'importance': clf.feature_importances_
         }).sort_values('importance', ascending=False)
-        
+
+        self.model_metadata['rain'] = {
+            'trained_at': datetime.utcnow().isoformat(),
+            'best_algorithm': 'random_forest_classifier',
+            'num_features': X.shape[1],
+            'training_samples': len(X_train),
+            'test_samples': len(X_test),
+            'metrics': {
+                'roc_auc': float(roc_auc),
+                'accuracy': float(report.get('accuracy', 0)),
+                'precision': float(report.get('weighted avg', {}).get('precision', 0)),
+                'recall': float(report.get('weighted avg', {}).get('recall', 0)),
+            },
+        }
+
         logger.info(f"Rain classifier ROC-AUC: {roc_auc:.4f}")
-        
+
         return results
     
     def hyperparameter_tuning(self, X: pd.DataFrame, y: pd.Series, 
@@ -330,24 +369,30 @@ class WeatherPredictor:
         return self.best_models[model_type].predict(X_scaled)
 
     def save_models(self):
-        """Save trained models to disk"""
+        """Save trained models to disk with metadata and register versions"""
         import os
+        from src.ml_models.model_registry import ModelRegistry
+
         os.makedirs(self.model_dir, exist_ok=True)
-        
+        registry = ModelRegistry(os.path.join(self.model_dir, "registry.json"))
+
         for name, model in self.best_models.items():
             filepath = f"{self.model_dir}{name}_model.pkl"
+            meta = self.model_metadata.get(name, {})
             artifact = {
                 'model': model,
                 'scaler': self.scaler,
-                'feature_columns': self.feature_columns
+                'feature_columns': self.feature_columns,
+                'metadata': meta,
             }
             joblib.dump(artifact, filepath)
+            registry.register(name, filepath, meta)
             logger.info(f"Saved {name} model to {filepath}")
     
     def load_models(self):
-        """Load models from disk"""
+        """Load models from disk with metadata"""
         import os
-        
+
         for filename in os.listdir(self.model_dir):
             if filename.endswith('_model.pkl'):
                 name = filename.replace('_model.pkl', '')
@@ -357,6 +402,7 @@ class WeatherPredictor:
                     self.best_models[name] = loaded['model']
                     self.scaler = loaded.get('scaler')
                     self.feature_columns = loaded.get('feature_columns')
+                    self.model_metadata[name] = loaded.get('metadata', {})
                 else:
                     # Backward compatibility: bare model from old saves
                     self.best_models[name] = loaded
