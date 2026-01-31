@@ -14,3 +14,8 @@ python-dotenv==1.0.0
 # Testing
 pytest==7.4.0
 pytest-cov==4.1.0
+
+# Linting & Type Checking
+black==23.7.0
+flake8==6.1.0
+mypy==1.5.1

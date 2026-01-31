@@ -1,0 +1,40 @@
+[flake8]
+max-line-length = 120
+ignore =
+    # Line length (handled by black)
+    E501,
+    # Whitespace before ':' (conflicts with black)
+    E203,
+    # Line break before binary operator (conflicts with black)
+    W503,
+    # Trailing whitespace
+    W291,
+    # Blank line contains whitespace
+    W293,
+    # No newline at end of file
+    W292,
+    # Line break after binary operator
+    W504,
+    # Missing whitespace around arithmetic operator
+    E226,
+    # Module level import not at top of file (needed for matplotlib.use)
+    E402,
+    # Continuation line indentation (conflicts with black)
+    E127,
+    E128,
+    # Expected 2 blank lines
+    E302,
+    E305,
+    # Unused imports (will be enforced incrementally)
+    F401,
+    # f-string without placeholders
+    F541,
+    # Assigned but unused variable
+    F841
+exclude =
+    .git,
+    __pycache__,
+    venv,
+    .venv,
+    build,
+    dist
