@@ -3,6 +3,7 @@ Tests for additional WeatherCollector methods: get_recent_data, run_scheduler, d
 """
 
 import sqlite3
+from datetime import datetime
 import pytest
 import pandas as pd
 from unittest.mock import patch, MagicMock
@@ -82,8 +83,9 @@ class TestRunScheduler:
 class TestDatabaseOperationsAdditional:
     def test_store_multiple_records(self, mock_collector, sample_raw_api_response):
         collector, _ = mock_collector
-        for _ in range(5):
+        for i in range(5):
             parsed = collector.parse_weather_data(sample_raw_api_response)
+            parsed["timestamp"] = datetime.fromtimestamp(1700000000 + i * 3600)
             collector.store_weather_data(parsed)
 
         conn = sqlite3.connect(collector.config.db_path)

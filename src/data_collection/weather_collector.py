@@ -151,7 +151,8 @@ class WeatherCollector:
                 lat REAL,
                 lon REAL,
                 timezone INTEGER,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(city, timestamp)
             )
         """)
         
@@ -249,6 +250,39 @@ class WeatherCollector:
             logger.error(f"Error fetching data for {city}: {e}")
             return None
             
+    def validate_api_response(self, data: Dict) -> bool:
+        """Validate that an API response contains all required fields.
+
+        Returns True if the response is valid, False otherwise.
+        """
+        required_top = ['name', 'dt', 'main', 'wind', 'weather', 'coord']
+        required_main = ['temp', 'humidity', 'pressure']
+        required_coord = ['lat', 'lon']
+
+        for key in required_top:
+            if key not in data:
+                logger.warning(f"API response missing required field: '{key}'")
+                return False
+
+        main = data.get('main', {})
+        for key in required_main:
+            if key not in main:
+                logger.warning(f"API response 'main' missing field: '{key}'")
+                return False
+
+        coord = data.get('coord', {})
+        for key in required_coord:
+            if key not in coord:
+                logger.warning(f"API response 'coord' missing field: '{key}'")
+                return False
+
+        weather = data.get('weather')
+        if not isinstance(weather, list) or len(weather) == 0:
+            logger.warning("API response 'weather' is empty or not a list")
+            return False
+
+        return True
+
     def parse_weather_data(self, raw_data: Dict) -> Dict:
         """Parse raw API response into structured format"""
         parsed = {
@@ -276,22 +310,30 @@ class WeatherCollector:
         return parsed
         
     def store_weather_data(self, weather_data: Dict):
-        """Store parsed weather data in SQLite database"""
+        """Store parsed weather data in SQLite database using UPSERT to prevent duplicates.
+
+        On conflict with an existing (city, timestamp) pair, the row is updated
+        with the latest values instead of inserting a duplicate.
+        """
         conn = sqlite3.connect(self.config.db_path)
         cursor = conn.cursor()
-        
+
         columns = list(weather_data.keys())
         placeholders = ['?' for _ in columns]
-        
+        update_cols = [c for c in columns if c not in ('city', 'timestamp')]
+        update_clause = ', '.join(f'{c} = excluded.{c}' for c in update_cols)
+
         query = f"""
             INSERT INTO weather_data ({', '.join(columns)})
             VALUES ({', '.join(placeholders)})
+            ON CONFLICT(city, timestamp) DO UPDATE SET
+                {update_clause}
         """
-        
+
         cursor.execute(query, list(weather_data.values()))
         conn.commit()
         conn.close()
-        
+
         logger.info(f"Stored weather data for {weather_data['city']}")
         
     def collect_all_cities(self):
@@ -302,6 +344,9 @@ class WeatherCollector:
             raw_data = self.fetch_weather_data(city)
 
             if raw_data:
+                if not self.validate_api_response(raw_data):
+                    logger.error(f"Invalid API response for {city}, skipping")
+                    continue
                 parsed_data = self.parse_weather_data(raw_data)
                 self.store_weather_data(parsed_data)
 
