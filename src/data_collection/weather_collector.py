@@ -9,9 +9,11 @@ from datetime import datetime
 import json
 import sqlite3
 import logging
+import collections
+import threading
 from typing import Dict, List, Optional
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import schedule
 import time
 
@@ -22,6 +24,76 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class APIMetrics:
+    """Track API call metrics."""
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    retried_requests: int = 0
+    total_response_time: float = 0.0
+
+    @property
+    def success_rate(self) -> float:
+        if self.total_requests == 0:
+            return 0.0
+        return self.successful_requests / self.total_requests * 100
+
+    @property
+    def average_response_time(self) -> float:
+        if self.successful_requests == 0:
+            return 0.0
+        return self.total_response_time / self.successful_requests
+
+    def log_summary(self):
+        logger.info(
+            f"API Metrics - Total: {self.total_requests}, "
+            f"Success: {self.successful_requests}, "
+            f"Failed: {self.failed_requests}, "
+            f"Retries: {self.retried_requests}, "
+            f"Success Rate: {self.success_rate:.1f}%, "
+            f"Avg Response Time: {self.average_response_time:.3f}s"
+        )
+
+    def reset(self):
+        self.total_requests = 0
+        self.successful_requests = 0
+        self.failed_requests = 0
+        self.retried_requests = 0
+        self.total_response_time = 0.0
+
+
+class RateLimiter:
+    """Sliding window rate limiter for API calls."""
+
+    def __init__(self, max_calls: int = 60, period: float = 60.0):
+        self.max_calls = max_calls
+        self.period = period
+        self._calls: collections.deque = collections.deque()
+        self._lock = threading.Lock()
+
+    def wait_if_needed(self):
+        """Block until a call is allowed under the rate limit."""
+        with self._lock:
+            now = time.monotonic()
+            # Remove expired entries
+            while self._calls and self._calls[0] <= now - self.period:
+                self._calls.popleft()
+
+            if len(self._calls) >= self.max_calls:
+                sleep_time = self._calls[0] - (now - self.period)
+                if sleep_time > 0:
+                    logger.warning(f"Rate limit reached. Waiting {sleep_time:.1f}s")
+                    time.sleep(sleep_time)
+                    # Clean up after sleeping
+                    now = time.monotonic()
+                    while self._calls and self._calls[0] <= now - self.period:
+                        self._calls.popleft()
+
+            self._calls.append(time.monotonic())
+
+
 @dataclass
 class WeatherConfig:
     """Configuration for weather data collection"""
@@ -29,6 +101,10 @@ class WeatherConfig:
     cities: List[str]
     update_interval: int = 3600  # seconds
     db_path: str = "data/weather.db"
+    max_retries: int = 3
+    request_timeout: int = 10  # seconds
+    rate_limit_calls: int = 60
+    rate_limit_period: float = 60.0  # seconds
     
 class WeatherCollector:
     """Collects weather data from OpenWeatherMap API"""
@@ -37,6 +113,11 @@ class WeatherCollector:
     
     def __init__(self, config: WeatherConfig):
         self.config = config
+        self.metrics = APIMetrics()
+        self.rate_limiter = RateLimiter(
+            max_calls=config.rate_limit_calls,
+            period=config.rate_limit_period,
+        )
         self.setup_database()
         
     def setup_database(self):
@@ -84,23 +165,87 @@ class WeatherCollector:
         conn.close()
         logger.info("Database initialized successfully")
         
+    def _make_request_with_retry(self, city: str, params: Dict) -> requests.Response:
+        """Make HTTP request with retry logic and exponential backoff.
+
+        Retries on connection errors, timeouts, and server errors (5xx).
+        Does not retry on client errors (4xx).
+        """
+        last_exception: Optional[Exception] = None
+        max_attempts = self.config.max_retries + 1
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.rate_limiter.wait_if_needed()
+                start_time = time.monotonic()
+                response = requests.get(
+                    self.BASE_URL,
+                    params=params,
+                    timeout=self.config.request_timeout,
+                )
+                elapsed = time.monotonic() - start_time
+                self.metrics.total_response_time += elapsed
+
+                # Raise on server errors to trigger retry
+                if response.status_code >= 500:
+                    raise requests.exceptions.HTTPError(
+                        f"{response.status_code} Server Error for {city}",
+                        response=response,
+                    )
+
+                return response
+
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
+                last_exception = e
+                if attempt < max_attempts:
+                    wait_time = 2 ** (attempt - 1)  # 1s, 2s, 4s
+                    self.metrics.retried_requests += 1
+                    logger.warning(
+                        f"Request for {city} failed (attempt {attempt}/{max_attempts}): {e}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+
+            except requests.exceptions.HTTPError as e:
+                last_exception = e
+                if (e.response is not None
+                        and e.response.status_code >= 500
+                        and attempt < max_attempts):
+                    wait_time = 2 ** (attempt - 1)
+                    self.metrics.retried_requests += 1
+                    logger.warning(
+                        f"Server error for {city} (attempt {attempt}/{max_attempts}): {e}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                else:
+                    # Client error (4xx) or final attempt — don't retry
+                    raise
+
+        raise last_exception
+
     def fetch_weather_data(self, city: str) -> Optional[Dict]:
-        """Fetch weather data for a single city"""
+        """Fetch weather data for a single city with retry and rate limiting."""
+        self.metrics.total_requests += 1
+
         try:
             params = {
                 'q': city,
                 'appid': self.config.api_key,
                 'units': 'metric'  # Use metric units
             }
-            
-            response = requests.get(self.BASE_URL, params=params, timeout=10)
+
+            response = self._make_request_with_retry(city, params)
             response.raise_for_status()
-            
+
+            self.metrics.successful_requests += 1
             data = response.json()
             logger.info(f"Successfully fetched data for {city}")
             return data
-            
+
         except requests.exceptions.RequestException as e:
+            self.metrics.failed_requests += 1
             logger.error(f"Error fetching data for {city}: {e}")
             return None
             
@@ -152,14 +297,15 @@ class WeatherCollector:
     def collect_all_cities(self):
         """Collect weather data for all configured cities"""
         logger.info("Starting weather data collection cycle")
-        
+
         for city in self.config.cities:
             raw_data = self.fetch_weather_data(city)
-            
+
             if raw_data:
                 parsed_data = self.parse_weather_data(raw_data)
                 self.store_weather_data(parsed_data)
-                
+
+        self.metrics.log_summary()
         logger.info("Completed weather data collection cycle")
         
     def get_recent_data(self, hours: int = 24) -> pd.DataFrame:
