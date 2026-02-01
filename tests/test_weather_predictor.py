@@ -360,3 +360,216 @@ class TestPredictorEdgeCases:
         files = os.listdir(predictor_instance.model_dir)
         pkl_files = [f for f in files if f.endswith(".pkl")]
         assert len(pkl_files) == 0
+
+
+# ---------------------------------------------------------------------------
+# Temporal validation fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def temporal_dataframe():
+    """DataFrame with an explicit timestamp column sorted chronologically."""
+    np.random.seed(42)
+    n = 100
+    timestamps = pd.date_range("2024-01-01", periods=n, freq="h")
+    # Temperature with a clear upward trend so temporal ordering matters
+    base_temp = np.linspace(10, 30, n) + np.random.normal(0, 1, n)
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "temperature": base_temp,
+        "humidity": np.random.uniform(30, 90, n),
+        "pressure": np.random.normal(1013, 5, n),
+        "wind_speed": np.random.uniform(0, 10, n),
+        "cloudiness": np.random.uniform(0, 100, n),
+        "hour_sin": np.sin(2 * np.pi * timestamps.hour / 24),
+        "hour_cos": np.cos(2 * np.pi * timestamps.hour / 24),
+        "temperature_lag_1h": np.roll(base_temp, 1),
+        "humidity_lag_1h": np.random.uniform(30, 90, n),
+        "temperature_rolling_mean_24h": np.random.normal(20, 3, n),
+        "heat_index": np.random.normal(25, 5, n),
+        "wind_chill": np.random.normal(18, 4, n),
+        "temp_humidity_interaction": np.random.normal(1200, 300, n),
+        "city_encoded": np.random.choice([0, 1], n),
+        "weather_main_encoded": np.random.choice([0, 1, 2, 3], n),
+    })
+    df["temperature_future"] = df["temperature"] + np.random.normal(0, 2, n)
+    df["will_rain"] = (np.random.rand(n) > 0.5).astype(int)
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Temporal validation tests
+# ---------------------------------------------------------------------------
+
+class TestTemporalTrainTestSplit:
+    def test_split_sizes(self, predictor_instance, temporal_dataframe):
+        X, y = predictor_instance.prepare_features(temporal_dataframe, "temperature_future")
+        X_train, X_test, y_train, y_test = WeatherPredictor.temporal_train_test_split(
+            X, y, test_size=0.2
+        )
+        assert len(X_train) == 80
+        assert len(X_test) == 20
+        assert len(y_train) == 80
+        assert len(y_test) == 20
+
+    def test_train_indices_precede_test(self, predictor_instance, temporal_dataframe):
+        X, y = predictor_instance.prepare_features(temporal_dataframe, "temperature_future")
+        X_train, X_test, _, _ = WeatherPredictor.temporal_train_test_split(
+            X, y, test_size=0.2
+        )
+        # Every training index should be less than every test index
+        assert X_train.index.max() < X_test.index.min()
+
+    def test_no_overlap(self, predictor_instance, temporal_dataframe):
+        X, y = predictor_instance.prepare_features(temporal_dataframe, "temperature_future")
+        X_train, X_test, _, _ = WeatherPredictor.temporal_train_test_split(
+            X, y, test_size=0.2
+        )
+        assert len(set(X_train.index) & set(X_test.index)) == 0
+
+    def test_time_index_sorts_shuffled_data(self, predictor_instance, temporal_dataframe):
+        """Passing time_index should re-sort shuffled data before splitting."""
+        X, y = predictor_instance.prepare_features(temporal_dataframe, "temperature_future")
+        time_idx = temporal_dataframe["timestamp"]
+
+        # Shuffle the data
+        shuffled = np.random.permutation(len(X))
+        X_shuffled = X.iloc[shuffled]
+        y_shuffled = y.iloc[shuffled]
+        time_shuffled = time_idx.iloc[shuffled]
+
+        X_train, X_test, _, _ = WeatherPredictor.temporal_train_test_split(
+            X_shuffled, y_shuffled, test_size=0.2, time_index=time_shuffled
+        )
+        # After sorting by time_index, train should still precede test
+        assert X_train.index.max() < X_test.index.min()
+
+    def test_all_data_preserved(self, predictor_instance, temporal_dataframe):
+        X, y = predictor_instance.prepare_features(temporal_dataframe, "temperature_future")
+        X_train, X_test, y_train, y_test = WeatherPredictor.temporal_train_test_split(
+            X, y, test_size=0.2
+        )
+        assert len(X_train) + len(X_test) == len(X)
+        assert len(y_train) + len(y_test) == len(y)
+
+
+class TestWalkForwardValidation:
+    def test_returns_expected_keys(self, predictor_instance, temporal_dataframe):
+        from sklearn.linear_model import LinearRegression
+        X, y = predictor_instance.prepare_features(temporal_dataframe, "temperature_future")
+        result = predictor_instance.walk_forward_validation(
+            X, y, LinearRegression(), n_splits=3
+        )
+        assert "fold_results" in result
+        assert "mean_mse" in result
+        assert "std_mse" in result
+        assert "mean_r2" in result
+        assert "std_r2" in result
+        assert result["n_splits"] == 3
+
+    def test_fold_count_matches(self, predictor_instance, temporal_dataframe):
+        from sklearn.linear_model import LinearRegression
+        X, y = predictor_instance.prepare_features(temporal_dataframe, "temperature_future")
+        result = predictor_instance.walk_forward_validation(
+            X, y, LinearRegression(), n_splits=4
+        )
+        assert len(result["fold_results"]) == 4
+
+    def test_expanding_window(self, predictor_instance, temporal_dataframe):
+        """Training size should grow with each fold (expanding window)."""
+        from sklearn.linear_model import LinearRegression
+        X, y = predictor_instance.prepare_features(temporal_dataframe, "temperature_future")
+        result = predictor_instance.walk_forward_validation(
+            X, y, LinearRegression(), n_splits=4
+        )
+        train_sizes = [f["train_size"] for f in result["fold_results"]]
+        assert train_sizes == sorted(train_sizes)
+        assert train_sizes[0] < train_sizes[-1]
+
+    def test_no_future_data_in_folds(self, predictor_instance, temporal_dataframe):
+        """In every fold, all training indices must precede all test indices."""
+        from sklearn.linear_model import LinearRegression
+        X, y = predictor_instance.prepare_features(temporal_dataframe, "temperature_future")
+        result = predictor_instance.walk_forward_validation(
+            X, y, LinearRegression(), n_splits=5
+        )
+        for fold in result["fold_results"]:
+            assert fold["train_end_idx"] < fold["test_start_idx"]
+
+    def test_finite_metrics(self, predictor_instance, temporal_dataframe):
+        from sklearn.linear_model import LinearRegression
+        X, y = predictor_instance.prepare_features(temporal_dataframe, "temperature_future")
+        result = predictor_instance.walk_forward_validation(
+            X, y, LinearRegression(), n_splits=3
+        )
+        assert np.isfinite(result["mean_mse"])
+        assert np.isfinite(result["mean_r2"])
+        for fold in result["fold_results"]:
+            assert np.isfinite(fold["mse"])
+            assert np.isfinite(fold["r2"])
+
+
+class TestDataLeakageChecks:
+    """Verify that temporal training mode prevents future data from leaking
+    into the training set."""
+
+    def test_temporal_temperature_training(self, temporal_dataframe, tmp_path):
+        """train_temperature_models(temporal=True) should use chronological split."""
+        model_dir = str(tmp_path / "temporal_models") + "/"
+        predictor = WeatherPredictor(model_dir=model_dir)
+        X, y = predictor.prepare_features(temporal_dataframe, "temperature_future")
+        results = predictor.train_temperature_models(X, y, temporal=True)
+
+        # Metadata should record temporal validation
+        assert predictor.model_metadata["temperature"]["validation_method"] == "temporal"
+
+        # All models should have been trained and produce finite metrics
+        for name, res in results.items():
+            assert np.isfinite(res["test_mse"])
+            assert np.isfinite(res["test_r2"])
+
+    def test_temporal_rain_training(self, temporal_dataframe, tmp_path):
+        """train_rain_classifier(temporal=True) should use chronological split."""
+        model_dir = str(tmp_path / "temporal_rain") + "/"
+        predictor = WeatherPredictor(model_dir=model_dir)
+        X, y = predictor.prepare_features(temporal_dataframe, "will_rain")
+        results = predictor.train_rain_classifier(X, y, temporal=True)
+
+        assert predictor.model_metadata["rain"]["validation_method"] == "temporal"
+        assert 0 <= results["roc_auc"] <= 1
+
+    def test_random_split_default(self, temporal_dataframe, tmp_path):
+        """Default (temporal=False) should record random validation method."""
+        model_dir = str(tmp_path / "random_models") + "/"
+        predictor = WeatherPredictor(model_dir=model_dir)
+        X, y = predictor.prepare_features(temporal_dataframe, "temperature_future")
+        predictor.train_temperature_models(X, y, temporal=False)
+        assert predictor.model_metadata["temperature"]["validation_method"] == "random"
+
+    def test_temporal_split_respects_trend(self, temporal_dataframe, tmp_path):
+        """With a trending target, temporal test set should have higher mean
+        than training set, proving the split is chronological."""
+        model_dir = str(tmp_path / "trend_models") + "/"
+        predictor = WeatherPredictor(model_dir=model_dir)
+        X, y = predictor.prepare_features(temporal_dataframe, "temperature_future")
+
+        X_train, X_test, y_train, y_test = WeatherPredictor.temporal_train_test_split(
+            X, y, test_size=0.2
+        )
+        # The fixture has an upward linear trend in temperature_future,
+        # so the later (test) values should have a higher mean.
+        assert y_test.mean() > y_train.mean()
+
+    def test_walk_forward_no_leakage_with_tree_model(self, temporal_dataframe, tmp_path):
+        """Walk-forward validation with a tree model should still respect
+        time ordering in every fold."""
+        from sklearn.ensemble import RandomForestRegressor
+        model_dir = str(tmp_path / "wf_tree") + "/"
+        predictor = WeatherPredictor(model_dir=model_dir)
+        X, y = predictor.prepare_features(temporal_dataframe, "temperature_future")
+
+        result = predictor.walk_forward_validation(
+            X, y, RandomForestRegressor(n_estimators=10, random_state=42), n_splits=3
+        )
+        for fold in result["fold_results"]:
+            assert fold["train_end_idx"] < fold["test_start_idx"]
