@@ -5,7 +5,8 @@ Includes multiple models for temperature and rain prediction
 
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, TimeSeriesSplit
+from sklearn.base import clone
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, RandomForestClassifier
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, classification_report, roc_auc_score
@@ -66,14 +67,131 @@ class WeatherPredictor:
 
         logger.info(f"Prepared {X.shape[1]} features for training")
         return X, y
-        
-    def train_temperature_models(self, X: pd.DataFrame, y: pd.Series) -> Dict:
-        """Train multiple regression models for temperature prediction"""
-        
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
+
+    @staticmethod
+    def temporal_train_test_split(
+        X: pd.DataFrame,
+        y: pd.Series,
+        test_size: float = 0.2,
+        time_index: Optional[pd.Series] = None,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+        """Split data chronologically for time series validation.
+
+        Unlike random train/test split, this ensures all training samples
+        precede all test samples in time, preventing data leakage.
+
+        Args:
+            X: Feature DataFrame.
+            y: Target Series.
+            test_size: Fraction of data to use as the test set (most recent).
+            time_index: Series of timestamps used for sorting. If None, the
+                data is assumed to already be in chronological order.
+
+        Returns:
+            (X_train, X_test, y_train, y_test) tuple.
+        """
+        if time_index is not None:
+            sort_order = time_index.argsort()
+            X = X.iloc[sort_order]
+            y = y.iloc[sort_order]
+
+        split_idx = int(len(X) * (1 - test_size))
+
+        return (
+            X.iloc[:split_idx],
+            X.iloc[split_idx:],
+            y.iloc[:split_idx],
+            y.iloc[split_idx:],
         )
+
+    def walk_forward_validation(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        model,
+        n_splits: int = 5,
+    ) -> Dict:
+        """Perform walk-forward (expanding window) cross-validation.
+
+        Each fold uses an expanding training window and a fixed-size test
+        window, ensuring the model is always validated on future data
+        relative to its training set.
+
+        Args:
+            X: Feature DataFrame, sorted chronologically.
+            y: Target Series.
+            model: scikit-learn compatible estimator.
+            n_splits: Number of time series CV folds.
+
+        Returns:
+            Dict with per-fold metrics and summary statistics.
+        """
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        fold_results = []
+
+        for fold_num, (train_idx, test_idx) in enumerate(tscv.split(X)):
+            X_train_fold = X.iloc[train_idx]
+            X_test_fold = X.iloc[test_idx]
+            y_train_fold = y.iloc[train_idx]
+            y_test_fold = y.iloc[test_idx]
+
+            fold_model = clone(model)
+            fold_model.fit(X_train_fold, y_train_fold)
+            y_pred = fold_model.predict(X_test_fold)
+
+            fold_mse = mean_squared_error(y_test_fold, y_pred)
+            fold_mae = mean_absolute_error(y_test_fold, y_pred)
+            fold_r2 = r2_score(y_test_fold, y_pred)
+
+            fold_results.append({
+                'fold': fold_num,
+                'train_size': len(X_train_fold),
+                'test_size': len(X_test_fold),
+                'mse': fold_mse,
+                'mae': fold_mae,
+                'r2': fold_r2,
+                'train_end_idx': int(train_idx[-1]),
+                'test_start_idx': int(test_idx[0]),
+            })
+
+            logger.info(
+                f"Walk-forward fold {fold_num}: train_size={len(X_train_fold)}, "
+                f"test_size={len(X_test_fold)}, MSE={fold_mse:.4f}, R2={fold_r2:.4f}"
+            )
+
+        mse_values = [f['mse'] for f in fold_results]
+        r2_values = [f['r2'] for f in fold_results]
+
+        return {
+            'fold_results': fold_results,
+            'mean_mse': float(np.mean(mse_values)),
+            'std_mse': float(np.std(mse_values)),
+            'mean_r2': float(np.mean(r2_values)),
+            'std_r2': float(np.std(r2_values)),
+            'n_splits': n_splits,
+        }
+
+    def train_temperature_models(self, X: pd.DataFrame, y: pd.Series,
+                                  temporal: bool = False) -> Dict:
+        """Train multiple regression models for temperature prediction.
+
+        Args:
+            X: Feature DataFrame.
+            y: Target Series.
+            temporal: If True, use chronological train/test split and
+                TimeSeriesSplit for cross-validation to prevent data leakage.
+                Data must be sorted chronologically.
+        """
+
+        # Split data
+        if temporal:
+            X_train, X_test, y_train, y_test = self.temporal_train_test_split(
+                X, y, test_size=0.2
+            )
+        else:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
         
         logger.info(f"Training set size: {len(X_train)}, Test set size: {len(X_test)}")
         
@@ -131,7 +249,8 @@ class WeatherPredictor:
             test_r2 = r2_score(y_test, y_pred_test)
             
             # Cross-validation score
-            cv_scores = cross_val_score(model, X_train, y_train, cv=5, 
+            cv = TimeSeriesSplit(n_splits=5) if temporal else 5
+            cv_scores = cross_val_score(model, X_train, y_train, cv=cv,
                                        scoring='neg_mean_squared_error')
             
             results[name] = {
@@ -167,6 +286,7 @@ class WeatherPredictor:
         self.model_metadata['temperature'] = {
             'trained_at': datetime.utcnow().isoformat(),
             'best_algorithm': best_model_name,
+            'validation_method': 'temporal' if temporal else 'random',
             'num_features': X.shape[1],
             'training_samples': len(X_train),
             'test_samples': len(X_test),
@@ -190,13 +310,26 @@ class WeatherPredictor:
 
         return results
     
-    def train_rain_classifier(self, X: pd.DataFrame, y: pd.Series) -> Dict:
-        """Train classification model for rain prediction"""
-        
+    def train_rain_classifier(self, X: pd.DataFrame, y: pd.Series,
+                              temporal: bool = False) -> Dict:
+        """Train classification model for rain prediction.
+
+        Args:
+            X: Feature DataFrame.
+            y: Target Series.
+            temporal: If True, use chronological train/test split to prevent
+                data leakage. Data must be sorted chronologically.
+        """
+
         # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
+        if temporal:
+            X_train, X_test, y_train, y_test = self.temporal_train_test_split(
+                X, y, test_size=0.2
+            )
+        else:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42, stratify=y
+            )
         
         logger.info(f"Training rain classifier. Class distribution: {y.value_counts().to_dict()}")
         
@@ -241,6 +374,7 @@ class WeatherPredictor:
         self.model_metadata['rain'] = {
             'trained_at': datetime.utcnow().isoformat(),
             'best_algorithm': 'random_forest_classifier',
+            'validation_method': 'temporal' if temporal else 'random',
             'num_features': X.shape[1],
             'training_samples': len(X_train),
             'test_samples': len(X_test),
