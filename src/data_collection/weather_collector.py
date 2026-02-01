@@ -16,6 +16,7 @@ import os
 from dataclasses import dataclass, field
 import schedule
 import time
+from src.monitoring.performance import PerformanceTracker
 
 # Configure logging
 logging.basicConfig(
@@ -108,12 +109,13 @@ class WeatherConfig:
     
 class WeatherCollector:
     """Collects weather data from OpenWeatherMap API"""
-    
+
     BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
-    
+
     def __init__(self, config: WeatherConfig):
         self.config = config
         self.metrics = APIMetrics()
+        self.perf = PerformanceTracker()
         self.rate_limiter = RateLimiter(
             max_calls=config.rate_limit_calls,
             period=config.rate_limit_period,
@@ -315,24 +317,25 @@ class WeatherCollector:
         On conflict with an existing (city, timestamp) pair, the row is updated
         with the latest values instead of inserting a duplicate.
         """
-        conn = sqlite3.connect(self.config.db_path)
-        cursor = conn.cursor()
+        with self.perf.track("db_store"):
+            conn = sqlite3.connect(self.config.db_path)
+            cursor = conn.cursor()
 
-        columns = list(weather_data.keys())
-        placeholders = ['?' for _ in columns]
-        update_cols = [c for c in columns if c not in ('city', 'timestamp')]
-        update_clause = ', '.join(f'{c} = excluded.{c}' for c in update_cols)
+            columns = list(weather_data.keys())
+            placeholders = ['?' for _ in columns]
+            update_cols = [c for c in columns if c not in ('city', 'timestamp')]
+            update_clause = ', '.join(f'{c} = excluded.{c}' for c in update_cols)
 
-        query = f"""
-            INSERT INTO weather_data ({', '.join(columns)})
-            VALUES ({', '.join(placeholders)})
-            ON CONFLICT(city, timestamp) DO UPDATE SET
-                {update_clause}
-        """
+            query = f"""
+                INSERT INTO weather_data ({', '.join(columns)})
+                VALUES ({', '.join(placeholders)})
+                ON CONFLICT(city, timestamp) DO UPDATE SET
+                    {update_clause}
+            """
 
-        cursor.execute(query, list(weather_data.values()))
-        conn.commit()
-        conn.close()
+            cursor.execute(query, list(weather_data.values()))
+            conn.commit()
+            conn.close()
 
         logger.info(f"Stored weather data for {weather_data['city']}")
         
@@ -351,21 +354,23 @@ class WeatherCollector:
                 self.store_weather_data(parsed_data)
 
         self.metrics.log_summary()
+        self.perf.log_summary()
         logger.info("Completed weather data collection cycle")
         
     def get_recent_data(self, hours: int = 24) -> pd.DataFrame:
         """Retrieve recent weather data from database"""
-        conn = sqlite3.connect(self.config.db_path)
-        
-        query = """
-            SELECT * FROM weather_data
-            WHERE datetime(timestamp) > datetime('now', '-{} hours')
-            ORDER BY timestamp DESC
-        """.format(hours)
-        
-        df = pd.read_sql_query(query, conn)
-        conn.close()
-        
+        with self.perf.track("db_query"):
+            conn = sqlite3.connect(self.config.db_path)
+
+            query = """
+                SELECT * FROM weather_data
+                WHERE datetime(timestamp) > datetime('now', '-{} hours')
+                ORDER BY timestamp DESC
+            """.format(hours)
+
+            df = pd.read_sql_query(query, conn)
+            conn.close()
+
         return df
         
     def run_scheduler(self):
