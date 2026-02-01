@@ -18,8 +18,11 @@ import seaborn as sns
 from typing import Dict, Tuple, List, Any, Optional
 from datetime import datetime
 import logging
+from src.monitoring.performance import PerformanceTracker
 
 logger = logging.getLogger(__name__)
+
+_perf = PerformanceTracker()
 
 class WeatherPredictor:
     """ML models for weather prediction"""
@@ -110,9 +113,10 @@ class WeatherPredictor:
         
         for name, model in models.items():
             logger.info(f"Training {name}...")
-            
+
             # Train model
-            model.fit(X_train, y_train)
+            with _perf.track(f"train_{name}"):
+                model.fit(X_train, y_train)
             
             # Make predictions
             y_pred_train = model.predict(X_train)
@@ -361,12 +365,13 @@ class WeatherPredictor:
         if self.scaler is None:
             raise ValueError("No scaler fitted. Train a model first or load one.")
 
-        X_prepared = X[self.feature_columns].fillna(0)
-        X_scaled = pd.DataFrame(
-            self.scaler.transform(X_prepared),
-            columns=self.feature_columns, index=X_prepared.index
-        )
-        return self.best_models[model_type].predict(X_scaled)
+        with _perf.track(f"predict_{model_type}"):
+            X_prepared = X[self.feature_columns].fillna(0)
+            X_scaled = pd.DataFrame(
+                self.scaler.transform(X_prepared),
+                columns=self.feature_columns, index=X_prepared.index
+            )
+            return self.best_models[model_type].predict(X_scaled)
 
     def save_models(self):
         """Save trained models to disk with metadata and register versions"""

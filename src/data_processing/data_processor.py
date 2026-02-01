@@ -10,8 +10,11 @@ from typing import Dict, Tuple, List, Optional
 import sqlite3
 from datetime import datetime, timedelta
 import logging
+from src.monitoring.performance import PerformanceTracker
 
 logger = logging.getLogger(__name__)
+
+_perf = PerformanceTracker()
 
 class WeatherDataProcessor:
     """Process and engineer features from weather data"""
@@ -268,37 +271,45 @@ class WeatherDataProcessor:
         logger.info("Created target variables")
         return df
         
-    def process_pipeline(self, 
+    def process_pipeline(self,
                         start_date: Optional[str] = None,
                         end_date: Optional[str] = None) -> pd.DataFrame:
         """Execute complete processing pipeline"""
         logger.info("Starting data processing pipeline")
-        
-        # Load data
-        df = self.load_data(start_date, end_date)
 
-        # Run quality checks on raw data
-        self.run_quality_checks(df)
+        with _perf.track("process_pipeline"):
+            # Load data
+            with _perf.track("load_data"):
+                df = self.load_data(start_date, end_date)
 
-        # Create features
-        df = self.create_time_features(df)
-        df = self.create_lag_features(df)
-        df = self.create_weather_indices(df)
-        df = self.create_interaction_features(df)
-        
-        # Handle missing values
-        df = self.handle_missing_values(df)
-        
-        # Encode categorical features
-        df = self.encode_categorical_features(df)
-        
-        # Create target variable
-        df = self.create_target_variable(df)
-        
-        # Remove rows without target
-        df = df.dropna(subset=['temperature_future'])
-        
+            # Run quality checks on raw data
+            with _perf.track("quality_checks"):
+                self.run_quality_checks(df)
+
+            # Create features
+            with _perf.track("feature_engineering"):
+                df = self.create_time_features(df)
+                df = self.create_lag_features(df)
+                df = self.create_weather_indices(df)
+                df = self.create_interaction_features(df)
+
+            # Handle missing values
+            with _perf.track("handle_missing_values"):
+                df = self.handle_missing_values(df)
+
+            # Encode categorical features
+            with _perf.track("encode_categorical"):
+                df = self.encode_categorical_features(df)
+
+            # Create target variable
+            with _perf.track("create_targets"):
+                df = self.create_target_variable(df)
+
+            # Remove rows without target
+            df = df.dropna(subset=['temperature_future'])
+
         logger.info(f"Pipeline complete. Final dataset shape: {df.shape}")
+        _perf.log_summary()
         return df
         
     # Physically plausible ranges for weather measurements
