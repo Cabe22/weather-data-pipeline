@@ -284,13 +284,25 @@ weather-data-pipeline/
 
 ## Screenshots
 
-> Screenshots of the Streamlit dashboard can be added here.
+### Dashboard Overview
+*Key metrics at a glance: average temperature, humidity, cities monitored, and total records collected, with sidebar controls for time range and city filtering.*
 
-<!--
 ![Dashboard Overview](docs/screenshots/dashboard-overview.png)
+
+### Temperature Trends
+*Interactive time series chart tracking temperature across 10 U.S. cities over a 72-hour window.*
+
 ![Temperature Trends](docs/screenshots/temperature-trends.png)
+
+### City Comparison
+*Side-by-side comparison of average temperature, humidity, wind speed, and pressure across all monitored cities.*
+
 ![City Comparison](docs/screenshots/city-comparison.png)
--->
+
+### ML Predictions
+*24-hour temperature predictions powered by ensemble ML models, with model version history and expandable details for rain and temperature models.*
+
+![ML Predictions](docs/screenshots/ml-predictions.png)
 
 ---
 
