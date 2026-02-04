@@ -184,16 +184,17 @@ class WeatherDataProcessor:
         df[time_cols] = df.groupby('city')[time_cols].ffill(limit=3)
         
         # Fill remaining with interpolation
-        df[time_cols] = df.groupby('city')[time_cols].apply(
-            lambda x: x.interpolate(method='linear', limit_direction='both')
-        )
+        for col in time_cols:
+            df[col] = df.groupby('city')[col].transform(
+                lambda x: x.interpolate(method='linear', limit_direction='both')
+            )
         
         # Fill categorical with mode
         categorical_cols = ['weather_main', 'weather_description', 'time_of_day']
         for col in categorical_cols:
             if col in df.columns:
-                df[col] = df.groupby('city')[col].fillna(
-                    lambda x: x.mode()[0] if not x.mode().empty else 'Unknown'
+                df[col] = df.groupby('city')[col].transform(
+                    lambda x: x.fillna(x.mode()[0] if not x.mode().empty else 'Unknown')
                 )
         
         # Drop rows with too many missing values
@@ -212,7 +213,7 @@ class WeatherDataProcessor:
             if col in df.columns:
                 if col not in self.label_encoders:
                     self.label_encoders[col] = LabelEncoder()
-                    df[f'{col}_encoded'] = self.label_encoders[col].fit_transform(df[col].fillna('Unknown'))
+                    df[f'{col}_encoded'] = self.label_encoders[col].fit_transform(df[col].astype(str).fillna('Unknown'))
                 else:
                     # Handle unseen categories
                     df[f'{col}_encoded'] = df[col].apply(

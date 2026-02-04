@@ -44,8 +44,8 @@ class WeatherPredictor:
         # Features to exclude
         exclude_cols = [
             'id', 'timestamp', 'created_at', 'city', 'country',
-            'weather_description', 'temperature_future', 'temp_change',
-            'temp_change_category', 'will_rain', 'time_of_day'
+            'weather_main', 'weather_description', 'temperature_future',
+            'temp_change', 'temp_change_category', 'will_rain', 'time_of_day'
         ]
         
         # Get feature columns

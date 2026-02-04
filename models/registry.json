@@ -1,0 +1,78 @@
+{
+  "versions": [
+    {
+      "version": "v1",
+      "model_type": "temperature",
+      "artifact_path": "models/temperature_model.pkl",
+      "artifact_hash": "bfa0730e9f2c5d6db158bc3c00196b63ccbf0aa297c4f8d6843f931e6769f5fb",
+      "registered_at": "2026-02-04T00:54:12.580157",
+      "metadata": {
+        "trained_at": "2026-02-04T00:52:31.207559",
+        "best_algorithm": "ridge",
+        "validation_method": "random",
+        "num_features": 68,
+        "training_samples": 5191,
+        "test_samples": 1298,
+        "metrics": {
+          "test_r2": 0.950324900507095,
+          "test_mse": 2.560193984362024,
+          "test_mae": 1.2182969386997275,
+          "cv_score_mean": 2.5696863168804427
+        },
+        "all_models": {
+          "linear_regression": {
+            "test_r2": 0.9503129748375343,
+            "test_mse": 2.5608086188122905,
+            "test_mae": 1.218356806096765
+          },
+          "ridge": {
+            "test_r2": 0.950324900507095,
+            "test_mse": 2.560193984362024,
+            "test_mae": 1.2182969386997275
+          },
+          "random_forest": {
+            "test_r2": 0.940911422572923,
+            "test_mse": 3.045353145088692,
+            "test_mae": 1.3275831843295496
+          },
+          "gradient_boosting": {
+            "test_r2": 0.9432871511183889,
+            "test_mse": 2.9229109961515296,
+            "test_mae": 1.3054808271543805
+          },
+          "xgboost": {
+            "test_r2": 0.943017813239673,
+            "test_mse": 2.9367923416120965,
+            "test_mae": 1.3102057914032912
+          },
+          "neural_network": {
+            "test_r2": 0.8823872177919307,
+            "test_mse": 6.061619212985911,
+            "test_mae": 1.94084733293629
+          }
+        }
+      }
+    },
+    {
+      "version": "v2",
+      "model_type": "rain",
+      "artifact_path": "models/rain_model.pkl",
+      "artifact_hash": "b414516ca69c63a4a3174e13994314a9392631def2ea733cb86868b723a0ca34",
+      "registered_at": "2026-02-04T00:54:12.690592",
+      "metadata": {
+        "trained_at": "2026-02-04T00:52:33.501787",
+        "best_algorithm": "random_forest_classifier",
+        "validation_method": "random",
+        "num_features": 68,
+        "training_samples": 5191,
+        "test_samples": 1298,
+        "metrics": {
+          "roc_auc": 0.9710311526379999,
+          "accuracy": 0.8859784283513097,
+          "precision": 0.8951505939673513,
+          "recall": 0.8859784283513097
+        }
+      }
+    }
+  ]
+}
